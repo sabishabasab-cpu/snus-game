@@ -1,0 +1,672 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Убеги от снюса</title>
+<!-- Скрипт Telegram: даёт доступ к функциям мини-приложения (развернуть на весь экран, вибрация) -->
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  html, body { margin: 0; height: 100%; background: #1b2333; overflow: hidden;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #f4f1ea;
+    -webkit-user-select: none; user-select: none; }
+  canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
+  #hud { position: fixed; top: 12px; left: 16px; right: 16px; display: flex; justify-content: space-between;
+    font-size: 18px; font-weight: 700; pointer-events: none; text-shadow: 0 2px 4px #0008; }
+  #fx { position: fixed; top: 40px; left: 16px; font-size: 16px; font-weight: 700; pointer-events: none;
+    text-shadow: 0 2px 4px #0008; }
+  #mute { position: fixed; top: 6px; left: 50%; transform: translateX(-50%); z-index: 10; width: auto; margin: 0;
+    padding: 6px 12px; font-size: 20px; background: #24304acc; color: #f4f1ea; border-radius: 12px; }
+  #toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 20; background: #ffb35c;
+    color: #1b2333; padding: 10px 18px; border-radius: 12px; font-weight: 700; font-size: 16px;
+    box-shadow: 0 6px 20px #0006; white-space: nowrap; }
+  .overlay { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: #0d1320cc; padding: 16px; box-sizing: border-box; }
+  .card { background: #24304a; border-radius: 20px; padding: 24px 22px; max-width: 380px; width: 100%;
+    max-height: 92vh; overflow-y: auto; text-align: center; box-shadow: 0 10px 30px #0006; box-sizing: border-box; }
+  .card h1 { margin: 0 0 10px; font-size: 26px; }
+  .card p { margin: 6px 0; font-size: 16px; line-height: 1.4; color: #c9d2e3; }
+  .big { font-size: 38px; font-weight: 800; color: #ffb35c; margin: 10px 0; }
+  .achBox { margin-top: 14px; text-align: left; background: #1b2333; border-radius: 12px; padding: 10px 12px; }
+  .achHead { font-weight: 700; margin-bottom: 6px; }
+  .ach { font-size: 14px; color: #8a96ad; margin: 3px 0; }
+  .ach.on { color: #f4f1ea; }
+  button { margin-top: 16px; border: 0; border-radius: 14px; padding: 14px 28px; font-size: 20px; font-weight: 700;
+    background: #e07a2e; color: #1b2333; cursor: pointer; width: 100%; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="hud" class="hidden"><span id="time">День 1 · 0 сек</span><span id="score">0 очков</span></div>
+<div id="fx"></div>
+
+<div id="menu" class="overlay"><div class="card">
+  <h1>Убеги от снюса</h1>
+  <p>Пакетики снюса гонятся за тобой. Не дай себя догнать!</p>
+  <p>📱 Веди пальцем — человечек бежит за ним.<br>⌨️ На компьютере — стрелки или WASD.</p>
+  <p>🍏 Яблоко +5 · 💧 ускорение · 🛡️ щит · 🌬️ всё замедляется</p>
+  <p>⚠️ После 20 секунд прилетают сигареты — следи за красным «!»</p>
+  <div class="achBox" id="achMenu"></div>
+  <button id="startBtn">Играть</button>
+</div></div>
+
+<div id="over" class="overlay hidden"><div class="card">
+  <h1>Догнал! 😵</h1>
+  <p id="joke"></p>
+  <div class="big" id="finalScore"></div>
+  <p id="overText"></p>
+  <p id="bestText"></p>
+  <div class="achBox" id="achOver"></div>
+  <button id="againBtn">Ещё раз</button>
+</div></div>
+
+<button id="mute">🔊</button>
+<div id="toast" class="hidden"></div>
+
+<script>
+// ===== 1. Подключение к Telegram (если игра открыта не в Telegram — просто пропускаем) =====
+const tg = window.Telegram && window.Telegram.WebApp;
+if (tg) { try { tg.ready(); tg.expand(); } catch (e) {} }
+function vibrate(kind) {
+  if (!tg || !tg.HapticFeedback) return;
+  try {
+    if (kind === 'error') tg.HapticFeedback.notificationOccurred('error');
+    else tg.HapticFeedback.impactOccurred(kind);
+  } catch (e) {}
+}
+
+// ===== 2. Холст (canvas) — "доска", на которой мы рисуем игру =====
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W = 0, H = 0;
+function resize() {
+  const dpr = window.devicePixelRatio || 1;   // чтобы на телефоне картинка была чёткой
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ===== 3. Память браузера: рекорд, достижения, число игр, звук =====
+function load(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
+function save(key, val) { try { localStorage.setItem(key, val); } catch (e) {} }
+let best = Number(load('snusBest')) || 0;
+let gamesPlayed = Number(load('snusGames')) || 0;
+let unlocked = {};
+try { unlocked = JSON.parse(load('snusAch') || '{}') || {}; } catch (e) { unlocked = {}; }
+
+// ===== 4. Звуки — генерируем прямо в браузере, без файлов =====
+let audio = null;
+let muted = load('snusMute') === '1';
+const muteBtn = document.getElementById('mute');
+muteBtn.textContent = muted ? '🔇' : '🔊';
+muteBtn.addEventListener('click', () => {
+  muted = !muted; save('snusMute', muted ? '1' : '0');
+  muteBtn.textContent = muted ? '🔇' : '🔊';
+});
+function initAudio() {
+  if (!audio) { try { audio = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+  if (audio && audio.state === 'suspended') audio.resume();
+}
+// Один "писк": частота, длительность, тип волны, громкость, задержка, к какой частоте съехать
+function tone(freq, dur, type, vol, delay, slideTo) {
+  if (!audio || muted) return;
+  const t0 = audio.currentTime + (delay || 0);
+  const o = audio.createOscillator(), g = audio.createGain();
+  o.type = type || 'sine';
+  o.frequency.setValueAtTime(freq, t0);
+  if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t0 + dur);
+  g.gain.setValueAtTime(vol || 0.1, t0);
+  g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+  o.connect(g); g.connect(audio.destination);
+  o.start(t0); o.stop(t0 + dur + 0.05);
+}
+const SFX = {
+  apple:  () => { tone(660, 0.08, 'square', 0.06); tone(990, 0.1, 'square', 0.06, 0.07); },
+  power:  () => { [523, 659, 784, 1046].forEach((f, i) => tone(f, 0.1, 'triangle', 0.12, i * 0.06)); },
+  shield: () => tone(320, 0.3, 'sawtooth', 0.1, 0, 80),
+  day:    () => { tone(784, 0.15, 'triangle', 0.12); tone(1046, 0.3, 'triangle', 0.12, 0.12); },
+  ach:    () => { [880, 1175, 1568].forEach((f, i) => tone(f, 0.12, 'sine', 0.12, i * 0.08)); },
+  cig:    () => tone(180, 0.25, 'triangle', 0.06, 0, 500),
+  over:   () => { tone(440, 0.6, 'sawtooth', 0.12, 0, 70); tone(220, 0.6, 'square', 0.05, 0.05, 50); }
+};
+
+// ===== 5. Достижения =====
+const ACH = [
+  { id: 't30',      name: 'Первые 30 секунд', desc: 'продержись 30 сек' },
+  { id: 't60',      name: 'Минута свободы',   desc: 'продержись 60 сек' },
+  { id: 't120',     name: 'Две минуты силы',  desc: 'продержись 120 сек' },
+  { id: 'apples10', name: 'Витаминный',       desc: 'собери 10 яблок за игру' },
+  { id: 'shield',   name: 'Неуязвимый',       desc: 'отбей врага щитом' },
+  { id: 'games10',  name: 'Упрямый',          desc: 'сыграй 10 раз' }
+];
+function renderAch(id) {
+  const n = ACH.filter(a => unlocked[a.id]).length;
+  document.getElementById(id).innerHTML =
+    '<div class="achHead">🏅 Достижения: ' + n + '/' + ACH.length + '</div>' +
+    ACH.map(a => '<div class="ach' + (unlocked[a.id] ? ' on' : '') + '">' +
+      (unlocked[a.id] ? '✅' : '🔒') + ' <b>' + a.name + '</b> — ' + a.desc + '</div>').join('');
+}
+function unlock(id) {
+  if (unlocked[id]) return;
+  unlocked[id] = true;
+  save('snusAch', JSON.stringify(unlocked));
+  const a = ACH.find(x => x.id === id);
+  toast('🏅 ' + a.name);
+  SFX.ach();
+}
+// Всплывающее сообщение снизу; если их несколько — показываем по очереди
+const toastQueue = [];
+let toastBusy = false;
+function toast(text) { toastQueue.push(text); if (!toastBusy) nextToast(); }
+function nextToast() {
+  const el = document.getElementById('toast');
+  if (!toastQueue.length) { el.classList.add('hidden'); toastBusy = false; return; }
+  toastBusy = true;
+  el.textContent = toastQueue.shift();
+  el.classList.remove('hidden');
+  setTimeout(nextToast, 2200);
+}
+
+// ===== 6. Управление: клавиатура и палец/мышь =====
+const keys = {};
+addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; if (e.key.startsWith('Arrow')) e.preventDefault(); });
+addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+let pointer = null; // куда ведёт палец (null — палец не на экране)
+canvas.addEventListener('pointerdown', e => { pointer = { x: e.clientX, y: e.clientY }; });
+canvas.addEventListener('pointermove', e => { if (pointer) pointer = { x: e.clientX, y: e.clientY }; });
+addEventListener('pointerup', () => { pointer = null; });
+addEventListener('pointercancel', () => { pointer = null; });
+function pressed(...names) { return names.some(n => keys[n]); }
+
+// ===== 7. Настройки врагов и бонусов =====
+// r — размер (для столкновений), mul — во сколько раз быстрее/медленнее обычного пакетика
+const TYPES = {
+  pouch: { r: 18, mul: 1 },     // обычный пакетик
+  mini:  { r: 12, mul: 1.2 },   // маленький и быстрый
+  puck:  { r: 28, mul: 0.6 }    // большая медленная шайба
+};
+const POWER = {
+  water:  { emoji: '💧', color: '#4aa8ff', name: 'Ускорение!' },
+  shield: { emoji: '🛡️', color: '#8fd3ff', name: 'Щит!' },
+  breath: { emoji: '🌬️', color: '#b8f0ff', name: 'Глубокий вдох!' }
+};
+const JOKES = [
+  'Придётся вкинуться… 😅 Или всё-таки нет? Попробуй ещё раз!',
+  'Тяга победила в этот раз. Но не навсегда!',
+  'Пакетик оказался быстрее. Реванш?',
+  'Почти ушёл! Ещё попытка — и ты свободен.'
+];
+
+// ===== 8. Состояние игры =====
+let state = 'menu';            // menu → play → over
+let player, enemies, apples, powerups, warnings, particles = [], floaters = [];
+let time, bonus, applesGot, spawnTimer, appleTimer, powerTimer, cigTimer, slow, day, banner, shake = 0;
+let last = 0;
+
+function reset() {
+  player = { x: W / 2, y: H / 2, r: 16, speed: 250, phase: 0, moving: false, face: 1,
+             boost: 0, shield: false, invuln: 0 };
+  enemies = []; apples = []; powerups = []; warnings = []; particles = []; floaters = [];
+  time = 0; bonus = 0; applesGot = 0;
+  spawnTimer = 0; appleTimer = 2; powerTimer = 7; cigTimer = 3; slow = 0;
+  day = 1; banner = { text: 'День 1 без никотина', t: 2.2 };
+  spawnChaser('pouch');
+}
+
+function edgePoint(m) {
+  const s = Math.floor(Math.random() * 4);
+  if (s === 0) return { x: -m, y: Math.random() * H };
+  if (s === 1) return { x: W + m, y: Math.random() * H };
+  if (s === 2) return { x: Math.random() * W, y: -m };
+  return { x: Math.random() * W, y: H + m };
+}
+function spawnChaser(type) {
+  const p = edgePoint(30);
+  enemies.push({ type, x: p.x, y: p.y, r: TYPES[type].r, mul: TYPES[type].mul, wobble: Math.random() * 6 });
+}
+function score() { return Math.floor(time) + bonus; }
+
+// Эффекты: искры и всплывающий текст
+function burst(x, y, color, n) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, s = 60 + Math.random() * 180;
+    particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 0.6, max: 0.6, color, size: 3 });
+  }
+}
+function floater(x, y, text, color) { floaters.push({ x, y, text, color, life: 1 }); }
+
+// Попадает ли сигарета (отрезок) в игрока
+function cigHits(e) {
+  const ux = Math.cos(e.angle), uy = Math.sin(e.angle);
+  const ax = e.x - ux * 20, ay = e.y - uy * 20;
+  const t = Math.max(0, Math.min(40, (player.x - ax) * ux + (player.y - ay) * uy));
+  return Math.hypot(player.x - (ax + ux * t), player.y - (ay + uy * t)) < player.r + 5;
+}
+
+// Враг коснулся игрока. Вернёт true, если игра окончена
+function hit(e, i) {
+  if (player.invuln > 0) return false;
+  if (player.shield) {
+    player.shield = false; player.invuln = 1.2; shake = 0.3;
+    SFX.shield(); vibrate('heavy');
+    burst(player.x, player.y, '#8fd3ff', 24);
+    floater(player.x, player.y - 40, 'Щит отбил!', '#8fd3ff');
+    unlock('shield');
+    if (e.type === 'cig') enemies.splice(i, 1);
+    else { // отбрасываем врага назад
+      const dx = e.x - player.x, dy = e.y - player.y, d = Math.hypot(dx, dy) || 1;
+      e.x += dx / d * 140; e.y += dy / d * 140;
+    }
+    return false;
+  }
+  gameOver();
+  return true;
+}
+
+// ===== 9. Логика одного шага игры (dt — сколько секунд прошло с прошлого кадра) =====
+function update(dt) {
+  time += dt;
+
+  // --- дни (уровни): каждые 30 секунд — новый день ---
+  const newDay = 1 + Math.floor(time / 30);
+  if (newDay !== day) { day = newDay; banner = { text: 'День ' + day + ' без никотина', t: 2.2 }; SFX.day(); }
+  if (time >= 30) unlock('t30');
+  if (time >= 60) unlock('t60');
+  if (time >= 120) unlock('t120');
+
+  // --- таймеры бонусов ---
+  player.boost = Math.max(0, player.boost - dt);
+  player.invuln = Math.max(0, player.invuln - dt);
+  slow = Math.max(0, slow - dt);
+  const slowMul = slow > 0 ? 0.4 : 1;
+
+  // --- движение игрока ---
+  let dx = 0, dy = 0, maxStep = player.speed * (player.boost > 0 ? 1.5 : 1) * dt;
+  if (pressed('arrowleft', 'a', 'ф')) dx -= 1;
+  if (pressed('arrowright', 'd', 'в')) dx += 1;
+  if (pressed('arrowup', 'w', 'ц')) dy -= 1;
+  if (pressed('arrowdown', 's', 'ы')) dy += 1;
+  if (pointer) {
+    const px = pointer.x - player.x, py = pointer.y - player.y, d = Math.hypot(px, py);
+    if (d > 4) { dx = px; dy = py; maxStep = Math.min(maxStep, d); } else { dx = 0; dy = 0; }
+  }
+  const len = Math.hypot(dx, dy);
+  player.moving = len > 0;
+  if (len > 0) {
+    player.x += dx / len * maxStep;
+    player.y += dy / len * maxStep;
+    player.phase += dt * (player.boost > 0 ? 20 : 14);
+    if (Math.abs(dx) > 0.01) player.face = dx > 0 ? 1 : -1;
+  }
+  player.x = Math.max(player.r, Math.min(W - player.r, player.x));
+  player.y = Math.max(player.r + 20, Math.min(H - player.r - 10, player.y));
+
+  // --- враги ---
+  const base = Math.min(80 + time * 2, 175);   // скорость пакетиков: старт 80, +2 в секунду, максимум 175
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    if (e.type === 'cig') { // сигарета летит по прямой
+      e.x += e.vx * dt * slowMul; e.y += e.vy * dt * slowMul;
+      if (Math.random() < 0.5) particles.push({ x: e.x - Math.cos(e.angle) * 20, y: e.y - Math.sin(e.angle) * 20,
+        vx: (Math.random() - 0.5) * 20, vy: -20, life: 0.5, max: 0.5, color: '#9aa6bd', size: 4 });
+      if (e.x < -80 || e.x > W + 80 || e.y < -80 || e.y > H + 80) { enemies.splice(i, 1); continue; }
+      if (cigHits(e) && hit(e, i)) return;
+      continue;
+    }
+    // остальные гонятся за игроком
+    const ex = player.x - e.x, ey = player.y - e.y, d = Math.hypot(ex, ey) || 1;
+    const sp = Math.min(base * e.mul, 200) * slowMul;   // даже мини-пакетик не быстрее 200
+    e.x += ex / d * sp * dt; e.y += ey / d * sp * dt;
+    e.wobble += dt * 8;
+    if (d < player.r + e.r && hit(e, i)) return;
+  }
+  // враги расталкивают друг друга, чтобы не слипались
+  for (let i = 0; i < enemies.length; i++) {
+    for (let j = i + 1; j < enemies.length; j++) {
+      const a = enemies[i], b = enemies[j];
+      if (a.type === 'cig' || b.type === 'cig') continue;
+      const ox = b.x - a.x, oy = b.y - a.y, d = Math.hypot(ox, oy) || 1, min = a.r + b.r + 6;
+      if (d < min) {
+        const push = (min - d) / 2;
+        a.x -= ox / d * push; a.y -= oy / d * push;
+        b.x += ox / d * push; b.y += oy / d * push;
+      }
+    }
+  }
+
+  // --- новые преследователи каждые 12 секунд (максимум 6) ---
+  spawnTimer += dt;
+  const chasers = enemies.filter(e => e.type !== 'cig').length;
+  if (spawnTimer >= 12 && chasers < 6) {
+    spawnTimer = 0;
+    const pool = time < 20 ? ['pouch'] : ['pouch', 'pouch', 'mini', 'puck'];
+    spawnChaser(pool[Math.floor(Math.random() * pool.length)]);
+  }
+
+  // --- сигареты: сначала предупреждение «!», потом полёт ---
+  if (time >= 20) {
+    cigTimer -= dt;
+    if (cigTimer <= 0) {
+      cigTimer = Math.max(2.5, 7 - day * 0.6) + Math.random() * 2;
+      const p = edgePoint(40);
+      warnings.push({ x: p.x, y: p.y, t: 0.9 });
+    }
+  }
+  for (let i = warnings.length - 1; i >= 0; i--) {
+    const w = warnings[i];
+    w.t -= dt;
+    if (w.t <= 0) {
+      warnings.splice(i, 1);
+      const ddx = player.x - w.x, ddy = player.y - w.y, d = Math.hypot(ddx, ddy) || 1;
+      enemies.push({ type: 'cig', x: w.x, y: w.y, vx: ddx / d * 340, vy: ddy / d * 340, r: 6, angle: Math.atan2(ddy, ddx) });
+      SFX.cig();
+    }
+  }
+
+  // --- яблоки ---
+  appleTimer -= dt;
+  if (appleTimer <= 0 && apples.length < 3) {
+    apples.push({ x: 40 + Math.random() * (W - 80), y: 70 + Math.random() * (H - 110), t: 0 });
+    appleTimer = 4 + Math.random() * 3;
+  }
+  for (let i = apples.length - 1; i >= 0; i--) {
+    const a = apples[i];
+    a.t += dt;
+    if (Math.hypot(a.x - player.x, a.y - player.y) < player.r + 14) {
+      bonus += 5; applesGot++;
+      apples.splice(i, 1);
+      burst(a.x, a.y, '#6cc070', 12);
+      floater(a.x, a.y - 20, '+5', '#6cc070');
+      SFX.apple(); vibrate('light');
+      if (applesGot >= 10) unlock('apples10');
+    }
+  }
+
+  // --- бонусы: вода, щит, вдох ---
+  powerTimer -= dt;
+  if (powerTimer <= 0 && powerups.length === 0) {
+    const kinds = Object.keys(POWER);
+    powerups.push({ kind: kinds[Math.floor(Math.random() * kinds.length)],
+      x: 50 + Math.random() * (W - 100), y: 80 + Math.random() * (H - 130), life: 8 });
+    powerTimer = 9 + Math.random() * 4;
+  }
+  for (let i = powerups.length - 1; i >= 0; i--) {
+    const p = powerups[i];
+    p.life -= dt;
+    if (p.life <= 0) { powerups.splice(i, 1); continue; }
+    if (Math.hypot(p.x - player.x, p.y - player.y) < player.r + 16) {
+      if (p.kind === 'water') player.boost = 3;
+      if (p.kind === 'shield') player.shield = true;
+      if (p.kind === 'breath') slow = 4;
+      powerups.splice(i, 1);
+      burst(p.x, p.y, POWER[p.kind].color, 18);
+      floater(p.x, p.y - 24, POWER[p.kind].name, POWER[p.kind].color);
+      SFX.power(); vibrate('medium');
+    }
+  }
+
+  // --- верхняя панель ---
+  document.getElementById('time').textContent = 'День ' + day + ' · ' + Math.floor(time) + ' сек';
+  document.getElementById('score').textContent = score() + ' очков';
+  let fx = '';
+  if (player.boost > 0) fx += '💧 ' + Math.ceil(player.boost) + 'с  ';
+  if (player.shield) fx += '🛡️ щит  ';
+  if (slow > 0) fx += '🌬️ ' + Math.ceil(slow) + 'с';
+  document.getElementById('fx').textContent = fx;
+}
+
+// Эффекты двигаются всегда — даже на экране проигрыша
+function updateFx(dt) {
+  shake = Math.max(0, shake - dt);
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.94; p.vy *= 0.94; p.life -= dt;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+  for (let i = floaters.length - 1; i >= 0; i--) {
+    const f = floaters[i];
+    f.y -= 40 * dt; f.life -= dt;
+    if (f.life <= 0) floaters.splice(i, 1);
+  }
+  if (banner) banner.t -= dt;
+}
+
+// ===== 10. Рисование =====
+const EMOJI_FONT = '"Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",sans-serif';
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function drawBackground() {
+  ctx.fillStyle = '#1b2333';
+  ctx.fillRect(-30, -30, W + 60, H + 60);
+  ctx.fillStyle = '#26324a';
+  for (let x = 20; x < W; x += 40) for (let y = 20; y < H; y += 40) ctx.fillRect(x, y, 3, 3);
+}
+
+function drawApple(a) {
+  const s = 1 + Math.sin(a.t * 5) * 0.08;   // яблоко "пульсирует"
+  ctx.save(); ctx.translate(a.x, a.y); ctx.scale(s, s);
+  ctx.fillStyle = '#6cc070';
+  ctx.beginPath(); ctx.arc(0, 2, 12, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#7a5230'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(0, -9); ctx.lineTo(2, -15); ctx.stroke();
+  ctx.fillStyle = '#3f8f4a';
+  ctx.beginPath(); ctx.ellipse(7, -13, 5, 2.5, -0.5, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+function drawPowerup(p) {
+  if (p.life < 2 && Math.floor(p.life * 8) % 2) return;   // мигает перед исчезновением
+  const c = POWER[p.kind];
+  const s = 1 + Math.sin(p.life * 6) * 0.1;
+  ctx.save(); ctx.translate(p.x, p.y); ctx.scale(s, s);
+  ctx.fillStyle = c.color + '33';
+  ctx.beginPath(); ctx.arc(0, 0, 22, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = c.color; ctx.lineWidth = 2; ctx.stroke();
+  ctx.font = '22px ' + EMOJI_FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(c.emoji, 0, 1);
+  ctx.restore();
+}
+
+function drawPlayer() {
+  const p = player, swing = p.moving ? Math.sin(p.phase) * 0.7 : 0.5;  // 0.5 — стоит, ноги чуть врозь
+  ctx.save(); ctx.translate(p.x, p.y);
+  if (p.invuln > 0 && Math.floor(p.invuln * 12) % 2) ctx.globalAlpha = 0.35;  // мигание после удара
+  if (p.shield) {
+    ctx.strokeStyle = '#8fd3ff'; ctx.lineWidth = 3; ctx.globalAlpha *= 0.8;
+    ctx.beginPath(); ctx.arc(0, -4, 30 + Math.sin(time * 6) * 2, 0, Math.PI * 2); ctx.stroke();
+    ctx.globalAlpha = p.invuln > 0 && Math.floor(p.invuln * 12) % 2 ? 0.35 : 1;
+  }
+  ctx.scale(p.face, 1);
+  if (p.boost > 0 && p.moving) {  // линии скорости
+    ctx.strokeStyle = '#4aa8ff'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let k = 0; k < 3; k++) { ctx.moveTo(-18 - k * 4, -14 + k * 10); ctx.lineTo(-34 - k * 4, -14 + k * 10); }
+    ctx.stroke();
+  }
+  ctx.strokeStyle = '#8fd3ff'; ctx.lineWidth = 4; ctx.lineCap = 'round';
+  ctx.beginPath();   // ноги
+  ctx.moveTo(0, 6); ctx.lineTo(Math.sin(swing) * 12, 22);
+  ctx.moveTo(0, 6); ctx.lineTo(-Math.sin(swing) * 12, 22);
+  ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0, -12); ctx.lineTo(0, 6); ctx.stroke();   // тело
+  ctx.beginPath();   // руки
+  ctx.moveTo(0, -6); ctx.lineTo(-Math.sin(swing) * 11, 4);
+  ctx.moveTo(0, -6); ctx.lineTo(Math.sin(swing) * 11, 4);
+  ctx.stroke();
+  ctx.fillStyle = '#8fd3ff';   // голова
+  ctx.beginPath(); ctx.arc(0, -21, 9, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#1b2333';   // глаз
+  ctx.beginPath(); ctx.arc(4, -22, 2, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+function angryFace(scale) {
+  ctx.save(); ctx.scale(scale, scale);
+  ctx.strokeStyle = '#1b2333'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(-11, -12); ctx.lineTo(-3, -8);
+  ctx.moveTo(11, -12); ctx.lineTo(3, -8);
+  ctx.stroke();
+  ctx.fillStyle = '#d33c2c';
+  ctx.beginPath(); ctx.arc(-6, -3, 3, 0, Math.PI * 2); ctx.arc(6, -3, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(0, 6, 7, 0.2 * Math.PI, 0.8 * Math.PI); ctx.stroke();
+  ctx.restore();
+}
+
+function drawPouch(e, scale) {
+  const w = 34 * scale, h = 44 * scale;
+  ctx.save(); ctx.translate(e.x, e.y); ctx.rotate(Math.sin(e.wobble) * 0.12);
+  roundRect(-w / 2, -h / 2, w, h, 10 * scale);
+  ctx.fillStyle = '#f4f1ea'; ctx.fill();
+  ctx.strokeStyle = '#b9b2a3'; ctx.lineWidth = 2; ctx.stroke();
+  angryFace(scale);
+  if (scale >= 1) {
+    ctx.fillStyle = '#8a826f'; ctx.font = 'bold 9px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+    ctx.fillText('СНЮС', 0, 19);
+  }
+  ctx.restore();
+}
+
+function drawPuck(e) {
+  ctx.save(); ctx.translate(e.x, e.y); ctx.rotate(Math.sin(e.wobble * 0.5) * 0.08);
+  ctx.fillStyle = '#2f3e5c';
+  ctx.beginPath(); ctx.arc(0, 0, 28, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#c9d2e3'; ctx.lineWidth = 3; ctx.stroke();
+  ctx.strokeStyle = '#4a5a7c'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(0, 0, 22, 0, Math.PI * 2); ctx.stroke();
+  ctx.save(); ctx.scale(1, 1);
+  ctx.strokeStyle = '#f4f1ea'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(-12, -10); ctx.lineTo(-4, -6); ctx.moveTo(12, -10); ctx.lineTo(4, -6); ctx.stroke();
+  ctx.fillStyle = '#ff6a4c';
+  ctx.beginPath(); ctx.arc(-7, -1, 3.5, 0, Math.PI * 2); ctx.arc(7, -1, 3.5, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+  ctx.fillStyle = '#c9d2e3'; ctx.font = 'bold 9px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.fillText('СНЮС', 0, 16);
+  ctx.restore();
+}
+
+function drawCig(e) {
+  ctx.save(); ctx.translate(e.x, e.y); ctx.rotate(e.angle);
+  ctx.fillStyle = '#e0a050'; ctx.fillRect(-20, -4, 12, 8);    // фильтр
+  ctx.fillStyle = '#f4f1ea'; ctx.fillRect(-8, -4, 26, 8);     // бумага
+  ctx.shadowColor = '#ff5a2c'; ctx.shadowBlur = 12;
+  ctx.fillStyle = '#ff5a2c'; ctx.fillRect(18, -4, 4, 8);      // огонёк
+  ctx.restore();
+}
+
+function drawWarning(w) {
+  if (Math.floor(w.t * 10) % 2) return;  // мигает
+  const x = Math.max(20, Math.min(W - 20, w.x)), y = Math.max(70, Math.min(H - 20, w.y));
+  ctx.fillStyle = '#d33c2c';
+  ctx.beginPath(); ctx.arc(x, y, 14, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#f4f1ea'; ctx.font = 'bold 20px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('!', x, y + 1);
+}
+
+function drawEnemy(e) {
+  if (e.type === 'pouch') drawPouch(e, 1);
+  else if (e.type === 'mini') drawPouch(e, 0.65);
+  else if (e.type === 'puck') drawPuck(e);
+  else drawCig(e);
+}
+
+function draw() {
+  ctx.save();
+  if (shake > 0) { const a = shake * 30; ctx.translate((Math.random() - 0.5) * a, (Math.random() - 0.5) * a); }
+  drawBackground();
+  if (player) {
+    apples.forEach(drawApple);
+    powerups.forEach(drawPowerup);
+    drawPlayer();
+    enemies.forEach(drawEnemy);
+    warnings.forEach(drawWarning);
+    for (const p of particles) {
+      ctx.globalAlpha = Math.max(0, p.life / p.max);
+      ctx.fillStyle = p.color;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    for (const f of floaters) {
+      ctx.globalAlpha = Math.max(0, f.life);
+      ctx.font = 'bold 20px sans-serif'; ctx.fillStyle = f.color;
+      ctx.fillText(f.text, f.x, f.y);
+    }
+    ctx.globalAlpha = 1;
+  }
+  if (slow > 0) { ctx.fillStyle = 'rgba(140,210,255,0.08)'; ctx.fillRect(-30, -30, W + 60, H + 60); }
+  ctx.restore();
+
+  // надпись "День N без никотина"
+  if (state === 'play' && banner && banner.t > 0) {
+    ctx.globalAlpha = Math.min(1, banner.t);
+    ctx.font = 'bold 30px system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.lineWidth = 6; ctx.strokeStyle = '#1b2333'; ctx.strokeText(banner.text, W / 2, H * 0.25);
+    ctx.fillStyle = '#ffb35c'; ctx.fillText(banner.text, W / 2, H * 0.25);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ===== 11. Начало и конец игры =====
+function show(id, on) { document.getElementById(id).classList.toggle('hidden', !on); }
+
+function start() {
+  initAudio();
+  reset();
+  state = 'play';
+  show('menu', false); show('over', false); show('hud', true);
+  last = performance.now();
+}
+
+function gameOver() {
+  state = 'over';
+  show('hud', false);
+  document.getElementById('fx').textContent = '';
+  shake = 0.5;
+  burst(player.x, player.y, '#d33c2c', 30);
+  SFX.over(); vibrate('error');
+
+  gamesPlayed++; save('snusGames', String(gamesPlayed));
+  if (gamesPlayed >= 10) unlock('games10');
+
+  const s = score(), isNew = s > best;
+  if (isNew) { best = s; save('snusBest', String(best)); }
+  document.getElementById('joke').textContent = JOKES[Math.floor(Math.random() * JOKES.length)];
+  document.getElementById('finalScore').textContent = s + ' очков';
+  document.getElementById('overText').textContent = 'Ты продержался ' + Math.floor(time) + ' сек · День ' + day;
+  document.getElementById('bestText').textContent = isNew ? '🏆 Новый рекорд!' : 'Рекорд: ' + best;
+  renderAch('achOver');
+  show('over', true);
+}
+
+document.getElementById('startBtn').addEventListener('click', start);
+document.getElementById('againBtn').addEventListener('click', start);
+renderAch('achMenu');
+
+// ===== 12. Главный цикл: ~60 раз в секунду обновляем и перерисовываем =====
+function loop(ts) {
+  const dt = Math.min((ts - last) / 1000 || 0, 0.05);
+  last = ts;
+  if (state === 'play') update(dt);
+  updateFx(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+reset();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
