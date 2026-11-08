@@ -9,8 +9,9 @@
 <style>
   html, body { margin: 0; height: 100%; background: #1b2333; overflow: hidden;
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #f4f1ea;
-    -webkit-user-select: none; user-select: none; }
-  canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
+    -webkit-user-select: none; user-select: none;
+    overscroll-behavior: none; /* страница не "тянется" при свайпе */ }
+  canvas { display: block; position: fixed; left: 0; top: 0; width: 100vw; height: 100vh; touch-action: none; }
   #hud { position: fixed; top: 12px; left: 16px; right: 16px; display: flex; justify-content: space-between;
     font-size: 18px; font-weight: 700; pointer-events: none; text-shadow: 0 2px 4px #0008; }
   #fx { position: fixed; top: 40px; left: 16px; font-size: 16px; font-weight: 700; pointer-events: none;
@@ -68,7 +69,14 @@
 <script>
 // ===== 1. Подключение к Telegram (если игра открыта не в Telegram — просто пропускаем) =====
 const tg = window.Telegram && window.Telegram.WebApp;
-if (tg) { try { tg.ready(); tg.expand(); } catch (e) {} }
+if (tg) {
+  try { tg.ready(); tg.expand(); } catch (e) {}
+  // Отключаем жест Telegram "потяни вниз, чтобы свернуть" — иначе при беге вверх/вниз окно шатается
+  try { if (tg.disableVerticalSwipes) tg.disableVerticalSwipes(); } catch (e) {}}
+// Запрещаем браузеру прокручивать/тянуть страницу пальцем (кроме карточек меню, там можно листать)
+document.addEventListener('touchmove', e => {
+  if (!e.target.closest || !e.target.closest('.card')) e.preventDefault();
+}, { passive: false });
 function vibrate(kind) {
   if (!tg || !tg.HapticFeedback) return;
   try {
